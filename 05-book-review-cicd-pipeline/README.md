@@ -1,41 +1,43 @@
-# Book Review App — Full CI/CD Pipeline
+# Project 05 — Book Review App: Full CI/CD Pipeline
 
-Production-grade two-repository CI/CD architecture using Terraform,
-Ansible, and Azure DevOps pipelines. Separates infrastructure and
-application concerns — reflecting how platform and application teams
-operate in professional engineering organisations.
+## Overview
+
+Production-grade two-repository CI/CD architecture using Terraform, Ansible, and Azure DevOps pipelines. Separates infrastructure and application concerns — reflecting how platform and application teams operate in professional engineering organisations. All secrets are managed through Azure DevOps secure storage; nothing sensitive is ever committed to source control.
 
 ## Architecture
+
 ```
-book-review-infra (repo)             book-review-app (repo)
-──────────────────────────           ──────────────────────────
-Azure DevOps Pipeline                Azure DevOps Pipeline
-        ↓                                    ↓
-  Terraform apply                      Ansible deploy
-        ↓                                    ↓
-  Azure VMs + MySQL  ── IPs ──→   Frontend VM + Backend VM
-                                      (PM2 process manager)
+book-review-infra (repo)          book-review-app (repo)
+──────────────────────────        ──────────────────────────
+Azure DevOps Pipeline             Azure DevOps Pipeline
+        ↓                                  ↓
+  Terraform apply               Ansible deploy
+        ↓                                  ↓
+Azure VMs + MySQL   ── IPs ──→  Frontend VM + Backend VM
+                                    (PM2 process manager)
 ```
 
 ## Team Responsibility Split
 
 | Role | Repository | Owns |
 |---|---|---|
-| Platform/Infra Team | `book-review-infra` | Terraform, Azure provisioning |
-| App/Dev Team | `book-review-app` | Application code, Ansible deployment |
+| Platform / Infra Team | `book-review-infra` | Terraform, Azure provisioning |
+| App / Dev Team | `book-review-app` | Application code, Ansible deployment |
 | DevOps Engineer | Both | Pipelines, secrets, service connections |
 
 ---
 
-## Phase 1 — Infrastructure (book-review-infra)
+## Phase 1 — Infrastructure Provisioning (book-review-infra)
 
 ### What Terraform provisions
+
 - Frontend Azure VM (Ubuntu)
 - Backend Azure VM (Ubuntu)
 - Azure MySQL Database
 - Networking, public IPs, NSG rules
 
 ### Infra pipeline (azure-pipelines.yml)
+
 ```yaml
 trigger:
   paths:
@@ -51,18 +53,19 @@ steps:
     inputs:
       provider: 'azurerm'
       command: 'init'
-      backendServiceArm: '<service-connection>'
+      backendServiceArm: '<service-connection-name>'
 
   - task: TerraformTaskV2@2
     inputs:
       provider: 'azurerm'
       command: 'apply'
-      environmentServiceNameAzureRM: '<service-connection>'
+      environmentServiceNameAzureRM: '<service-connection-name>'
 ```
 
-Pipeline triggers ONLY when files inside `terraform/` change.
+Pipeline triggers **only** when files inside `terraform/` change.
 
 ### Setting up the infra pipeline in Azure DevOps
+
 1. Pipelines → New Pipeline → GitHub (YAML)
 2. Select repo: `book-review-infra`
 3. Choose: "Existing Azure Pipelines YAML file"
@@ -73,8 +76,8 @@ Pipeline triggers ONLY when files inside `terraform/` change.
 
 ## Phase 2 — Manual IP Handoff
 
-After Terraform applies, VM public IPs are copied from pipeline logs
-into the Ansible inventory files (deliberate team boundary):
+After Terraform applies, VM public IPs are copied from pipeline logs into the Ansible inventory files. This is a deliberate team boundary that mirrors real-world handoffs between infra and app teams.
+
 ```ini
 # ansible/inventory.ini
 [frontend]
@@ -83,23 +86,28 @@ into the Ansible inventory files (deliberate team boundary):
 [backend]
 <backend-vm-public-ip>
 ```
+
 ```yaml
 # ansible/group_vars/backend.yaml
 db_host: <mysql-host>
 db_name: bookreviews
-db_user: appuser
+db_user: "{{ vault_db_user }}"
 db_password: "{{ vault_db_password }}"
 ```
+
+> **Note:** `db_user` and `db_password` are sourced from Ansible Vault or Azure DevOps secret pipeline variables — never stored in plaintext in any file committed to source control.
 
 ---
 
 ## Phase 3 — Application Deployment (book-review-app)
 
 ### What Ansible deploys
-- Backend: pulls code, installs Node deps, configures MySQL, starts with PM2
+
+- Backend: pulls code, installs Node deps, configures MySQL connection, starts with PM2
 - Frontend: pulls code, installs deps, builds Next.js, starts with PM2
 
 ### App pipeline (azure-pipelines.yml)
+
 ```yaml
 trigger:
   branches:
@@ -123,15 +131,14 @@ steps:
     displayName: 'Deploy with Ansible'
 ```
 
-Every push to `main` triggers a full redeploy of frontend + backend.
+Every push to `main` triggers a full redeploy of frontend and backend.
 
 ---
 
-## Phase 4 — CI/CD Lab: Static HTML Deploy via Azure Pipelines
+## Phase 4 — Lab: Static HTML Deploy via Azure Pipelines
 
-Before the full pipeline, a guided lab deployed a static HTML page
-to a VM running Nginx — demonstrating the fundamentals of pipeline-triggered
-deployments.
+Foundational lab deploying a static HTML page to a VM running Nginx — demonstrating pipeline-triggered deployments end to end.
+
 ```yaml
 trigger:
   - main
@@ -170,9 +177,10 @@ stages:
               inline: sudo systemctl restart nginx
 ```
 
-## Phase 5 — CI/CD Lab: React App Deployment with Build + Test + Deploy Stages
+## Phase 5 — Lab: React App with Build + Test + Deploy Stages
 
-Three-stage pipeline: Build → Test → Deploy (deploy only if tests pass).
+Three-stage pipeline: Build → Test → Deploy (deploy only if all tests pass).
+
 ```yaml
 trigger:
   - main
@@ -252,47 +260,57 @@ stages:
 |---|---|
 | SSH private key | Azure DevOps Library → Secure File |
 | SSH public key | Azure DevOps Library → Secure File |
-| Azure credentials | Service Principal via DevOps Service Connection |
-| DB passwords | Azure DevOps pipeline variables (marked secret) |
+| Azure credentials | Service Principal via Azure DevOps Service Connection |
+| DB credentials | Azure DevOps pipeline secret variables (masked in logs) |
+| Ansible Vault secrets | Ansible Vault encrypted strings — key stored in pipeline secret variable |
 
 Nothing sensitive is ever committed to source control.
+
+---
 
 ## Prerequisites Setup
 
 ### Create a Service Principal in Azure
+
 ```bash
 az ad sp create-for-rbac \
   --name "devops-sp" \
   --role Contributor \
-  --scopes /subscriptions/<subscription-id>/resourceGroups/<rg-name>
+  --scopes /subscriptions/<your-subscription-id>/resourceGroups/<your-rg-name>
 ```
 
-### Register in Azure DevOps
-Project Settings → Service Connections → New → Azure Resource Manager
-→ Service Principal (automatic)
+> Store the output (`appId`, `password`, `tenant`) in Azure DevOps as a Service Connection — never in code.
+
+### Register the Service Connection in Azure DevOps
+
+Project Settings → Service Connections → New → Azure Resource Manager → Service Principal (automatic)
 
 ### Upload SSH keys to Azure DevOps Library
+
 Pipelines → Library → Secure Files → Upload `id_rsa` and `id_rsa.pub`
 
-### Create SSH Service Connection (for VM access)
+### Create an SSH Service Connection (for VM access)
+
 Project Settings → Service Connections → New → SSH
-- Host: VM public IP
-- Port: 22
-- Username: azureuser
-- Password: VM password
-- Name: ssh-to-nginx-vm
+- **Host:** VM public IP
+- **Port:** 22
+- **Username:** `azureuser`
+- **Authentication:** SSH key (never password-based in production)
+- **Name:** `ssh-to-nginx-vm`
+
+---
 
 ## Key Concepts Demonstrated
 
-- Two-repo architecture separating infra and application pipelines
+- Two-repo architecture cleanly separating infra and application pipelines
 - Terraform for full Azure infrastructure provisioning from code
 - Ansible for repeatable, idempotent application deployment
-- Azure DevOps YAML pipelines with GitHub branch triggers
-- Multi-stage pipelines: Build → Test → Deploy (gate on test pass)
-- Secure File and secret variable management
+- Azure DevOps YAML pipelines with GitHub branch and path triggers
+- Multi-stage pipelines: Build → Test → Deploy with stage gating
+- Secure File and secret variable management — zero secrets in code
 - PM2 for production Node.js process management on Linux
-- Deliberate manual IP handoff modelling real team boundaries
+- Deliberate manual IP handoff modelling real-world team boundaries
 
-## Tools
+---
 
-`Terraform` `Ansible` `Azure DevOps` `Azure VMs` `MySQL` `PM2` `Nginx` `GitHub` `SSH` `Service Principal`
+**Tools:** Terraform · Ansible · Azure DevOps · Azure VMs · MySQL · PM2 · Nginx · GitHub · SSH · Service Principal
