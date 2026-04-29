@@ -1,29 +1,30 @@
 # Project 05 — Book Review App: Full CI/CD Pipeline
 
-## Overview
+## What This Project Does
 
-Production-grade two-repository CI/CD architecture using Terraform, Ansible, and Azure DevOps pipelines. Separates infrastructure and application concerns — reflecting how platform and application teams operate in professional engineering organisations. All secrets are managed through Azure DevOps secure storage; nothing sensitive is ever committed to source control.
+This project implements a production-grade CI/CD system for the Book Review application using a **two-repository architecture** in Azure DevOps. Instead of one big repository doing everything, the infrastructure code and the application code live in separate repositories, each with its own pipeline. This mirrors how real platform and development teams operate — the infra team owns the infrastructure repo, the dev team owns the application repo, and a DevOps engineer manages both pipelines.
+
+The infrastructure pipeline uses Terraform to provision Azure VMs and a MySQL database. The application pipeline uses Ansible to deploy and configure the application on those VMs. All secrets — SSH keys, database credentials, Azure credentials — are stored in Azure DevOps secure storage and injected at pipeline runtime. Nothing sensitive ever touches source control.
 
 ## Architecture
 
 ```
-book-review-infra (repo)          book-review-app (repo)
-──────────────────────────        ──────────────────────────
-Azure DevOps Pipeline             Azure DevOps Pipeline
-        ↓                                  ↓
-  Terraform apply               Ansible deploy
-        ↓                                  ↓
-Azure VMs + MySQL   ── IPs ──→  Frontend VM + Backend VM
-                                    (PM2 process manager)
+Two separate repositories, two separate pipelines:
+
+book-review-infra (repo)                book-review-app (repo)
+─────────────────────────               ─────────────────────────
+Triggered by: changes in /terraform     Triggered by: push to main
+
+         ↓                                        ↓
+  Azure DevOps Pipeline                  Azure DevOps Pipeline
+         ↓                                        ↓
+  terraform init                         pip install ansible
+  terraform plan                         Download SSH key (Secure File)
+  terraform apply                        ansible-playbook deploy.yml
+         ↓                                        ↓
+  Azure VMs + MySQL created    ──IPs──▶  App deployed to those VMs
+                                         (PM2 manages the Node.js process)
 ```
-
-## Team Responsibility Split
-
-| Role | Repository | Owns |
-|---|---|---|
-| Platform / Infra Team | `book-review-infra` | Terraform, Azure provisioning |
-| App / Dev Team | `book-review-app` | Application code, Ansible deployment |
-| DevOps Engineer | Both | Pipelines, secrets, service connections |
 
 ---
 
@@ -31,12 +32,11 @@ Azure VMs + MySQL   ── IPs ──→  Frontend VM + Backend VM
 
 ### What Terraform provisions
 
-- Frontend Azure VM (Ubuntu)
-- Backend Azure VM (Ubuntu)
-- Azure MySQL Database
-- Networking, public IPs, NSG rules
+Terraform reads the `terraform/` directory and creates all the Azure resources needed to run the application: two Ubuntu VMs (frontend and backend), an Azure MySQL database, networking, public IPs, and NSG rules. All of this happens automatically — no clicking in the Azure Portal.
 
-### Infra pipeline (azure-pipelines.yml)
+### The infrastructure pipeline (azure-pipelines.yml)
+
+**Why a path trigger?** The pipeline only runs when files inside `terraform/` change. If someone updates the README or adds a test file, this pipeline does not run. This prevents unnecessary infra changes.
 
 ```yaml
 trigger:
@@ -48,35 +48,40 @@ steps:
   - task: TerraformInstaller@0
     inputs:
       terraformVersion: 'latest'
+    # Installs the correct version of Terraform on the pipeline agent
 
   - task: TerraformTaskV2@2
     inputs:
       provider: 'azurerm'
       command: 'init'
       backendServiceArm: '<service-connection-name>'
+    # Initialises Terraform — downloads providers, connects to the Azure
+    # backend where remote state is stored
 
   - task: TerraformTaskV2@2
     inputs:
       provider: 'azurerm'
       command: 'apply'
       environmentServiceNameAzureRM: '<service-connection-name>'
+    # Applies the Terraform plan — creates or updates Azure resources
+    # Azure credentials come from the Service Connection, never from code
 ```
 
-Pipeline triggers **only** when files inside `terraform/` change.
+### Setting up the pipeline in Azure DevOps
 
-### Setting up the infra pipeline in Azure DevOps
-
-1. Pipelines → New Pipeline → GitHub (YAML)
-2. Select repo: `book-review-infra`
-3. Choose: "Existing Azure Pipelines YAML file"
-4. Path: `azure-pipelines.yaml`
-5. Click Run — Terraform provisions all Azure resources
+1. Go to **Pipelines → New Pipeline → GitHub (YAML)**
+2. Select the `book-review-infra` repository
+3. Choose **"Existing Azure Pipelines YAML file"**
+4. Set the path to `azure-pipelines.yaml`
+5. Click **Run** — Terraform provisions all Azure resources automatically
 
 ---
 
-## Phase 2 — Manual IP Handoff
+## Phase 2 — Handing Off the VM IPs to the App Team
 
-After Terraform applies, VM public IPs are copied from pipeline logs into the Ansible inventory files. This is a deliberate team boundary that mirrors real-world handoffs between infra and app teams.
+**Why this step exists:** After Terraform runs, it outputs the public IP addresses of the newly created VMs. The app team needs these IPs to configure Ansible's inventory — telling it which servers to deploy to. This handoff is deliberate; in real organisations, the platform team owns the infrastructure and the app team owns the deployment, and they communicate through outputs like this.
+
+The IPs are copied from the pipeline logs into the Ansible inventory file:
 
 ```ini
 # ansible/inventory.ini
@@ -87,15 +92,15 @@ After Terraform applies, VM public IPs are copied from pipeline logs into the An
 <backend-vm-public-ip>
 ```
 
+Database connection details are stored as Ansible Vault-encrypted variables — the actual values are never written in plaintext in any file:
+
 ```yaml
 # ansible/group_vars/backend.yaml
 db_host: <mysql-host>
 db_name: bookreviews
-db_user: "{{ vault_db_user }}"
-db_password: "{{ vault_db_password }}"
+db_user: "{{ vault_db_user }}"        # decrypted at runtime from Ansible Vault
+db_password: "{{ vault_db_password }}" # decrypted at runtime from Ansible Vault
 ```
-
-> **Note:** `db_user` and `db_password` are sourced from Ansible Vault or Azure DevOps secret pipeline variables — never stored in plaintext in any file committed to source control.
 
 ---
 
@@ -103,41 +108,47 @@ db_password: "{{ vault_db_password }}"
 
 ### What Ansible deploys
 
-- Backend: pulls code, installs Node deps, configures MySQL connection, starts with PM2
-- Frontend: pulls code, installs deps, builds Next.js, starts with PM2
+Ansible connects to each VM over SSH, pulls the application code, installs Node.js dependencies, configures the MySQL connection, and starts the application using PM2. PM2 is a process manager that keeps Node.js apps running in the background, restarts them if they crash, and starts them automatically on VM reboot.
 
-### App pipeline (azure-pipelines.yml)
+### The application pipeline (azure-pipelines.yml)
+
+**Why store the SSH key as a Secure File?** The pipeline needs an SSH private key to connect to the VMs. Secure Files in Azure DevOps Library is the correct storage mechanism — the file is encrypted at rest and is never visible in pipeline logs. It is downloaded to the agent at runtime and deleted after the pipeline finishes.
 
 ```yaml
 trigger:
   branches:
     include:
       - main
+# Every push to main triggers a full redeployment
 
 steps:
   - script: pip install ansible
+    # Install Ansible on the pipeline agent
 
   - task: DownloadSecureFile@1
     name: sshKey
     inputs:
       secureFile: 'id_rsa'
+    # Download the SSH private key from Azure DevOps Library (Secure Files)
+    # This key was uploaded there manually — it never exists in the repository
 
   - script: |
       chmod 600 $(sshKey.secureFilePath)
+      # Set correct permissions — SSH refuses to use keys with open permissions
+
       ansible-playbook -i ansible/inventory.ini \
         ansible/deploy.yml \
         --private-key $(sshKey.secureFilePath) \
         -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
-    displayName: 'Deploy with Ansible'
+      # Run the deployment playbook against the servers in the inventory
+    displayName: 'Deploy application with Ansible'
 ```
-
-Every push to `main` triggers a full redeploy of frontend and backend.
 
 ---
 
-## Phase 4 — Lab: Static HTML Deploy via Azure Pipelines
+## Phase 4 — Lab: Static HTML Deployment via Pipeline
 
-Foundational lab deploying a static HTML page to a VM running Nginx — demonstrating pipeline-triggered deployments end to end.
+Before building the full pipeline, this foundational lab demonstrated the core concept of pipeline-triggered deployments: a push to `main` automatically copies a file to a remote server and restarts the web server. Understanding this simple flow is the foundation for everything that comes after.
 
 ```yaml
 trigger:
@@ -145,6 +156,7 @@ trigger:
 
 pool:
   name: "self-hosted-agent-pool"
+  # Using a self-hosted agent — a VM with the required tools pre-installed
 
 variables:
   sshService: 'ssh-to-nginx-vm'
@@ -162,6 +174,7 @@ stages:
               inline: |
                 sudo chown -R www-data:www-data /var/www/html
                 sudo chmod -R 775 /var/www/html
+            # Fix permissions so the pipeline can write to the web root
 
           - task: CopyFilesOverSSH@0
             inputs:
@@ -169,17 +182,21 @@ stages:
               sourceFolder: '$(Build.SourcesDirectory)'
               contents: 'index.html'
               targetFolder: '$(webRoot)'
+            # Copy the HTML file from the pipeline workspace to the server
 
           - task: SSH@0
             inputs:
               sshEndpoint: '$(sshService)'
               runOptions: 'inline'
               inline: sudo systemctl restart nginx
+            # Restart Nginx so it picks up the new file
 ```
 
-## Phase 5 — Lab: React App with Build + Test + Deploy Stages
+---
 
-Three-stage pipeline: Build → Test → Deploy (deploy only if all tests pass).
+## Phase 5 — Lab: React App with Build → Test → Deploy Stages
+
+This lab introduced multi-stage pipelines with **stage gating**: the Deploy stage only runs if the Test stage passed. If any test fails, the pipeline stops and the broken build never reaches the server.
 
 ```yaml
 trigger:
@@ -194,6 +211,7 @@ variables:
   webRoot: '/var/www/html'
 
 stages:
+
   - stage: BuildReactApp
     jobs:
       - job: Build
@@ -203,14 +221,16 @@ stages:
               versionSpec: '20.x'
           - script: npm install
           - script: npm run build
+            # Compile the React app into static files
           - task: PublishBuildArtifacts@1
             inputs:
               pathToPublish: 'build'
               artifactName: '$(artifactName)'
+            # Store the compiled output so later stages can download it
 
   - stage: TestReactApp
     dependsOn: BuildReactApp
-    condition: succeeded()
+    condition: succeeded()   # only run if Build passed
     jobs:
       - job: Test
         steps:
@@ -219,10 +239,11 @@ stages:
               versionSpec: '20.x'
           - script: npm install
           - script: npm run test -- --watchAll=false
+            # Run all tests once — pipeline fails here if tests fail
 
   - stage: DeployToVM
     dependsOn: TestReactApp
-    condition: succeeded()
+    condition: succeeded()   # only deploy if tests passed
     jobs:
       - job: Deploy
         steps:
@@ -230,6 +251,7 @@ stages:
             inputs:
               artifactName: '$(artifactName)'
               downloadPath: '$(Pipeline.Workspace)'
+            # Download the compiled React build from the Build stage
 
           - task: CopyFilesOverSSH@0
             inputs:
@@ -237,6 +259,7 @@ stages:
               sourceFolder: '$(Pipeline.Workspace)/$(artifactName)'
               contents: '**'
               targetFolder: '$(webRoot)'
+            # Copy all compiled files to the web server
 
           - task: SSH@0
             inputs:
@@ -250,27 +273,16 @@ stages:
                   location / { try_files $uri /index.html; }
                 }' | sudo tee /etc/nginx/sites-available/default
                 sudo systemctl restart nginx
+            # Write the Nginx config and restart to serve the React app
 ```
 
 ---
 
-## Security Practices Applied
+## Prerequisites — One-time Setup
 
-| Secret | Where Stored |
-|---|---|
-| SSH private key | Azure DevOps Library → Secure File |
-| SSH public key | Azure DevOps Library → Secure File |
-| Azure credentials | Service Principal via Azure DevOps Service Connection |
-| DB credentials | Azure DevOps pipeline secret variables (masked in logs) |
-| Ansible Vault secrets | Ansible Vault encrypted strings — key stored in pipeline secret variable |
+### 1. Create an Azure Service Principal
 
-Nothing sensitive is ever committed to source control.
-
----
-
-## Prerequisites Setup
-
-### Create a Service Principal in Azure
+The pipeline needs permission to create and manage Azure resources. A Service Principal is an identity (like a service account) with limited permissions.
 
 ```bash
 az ad sp create-for-rbac \
@@ -279,38 +291,37 @@ az ad sp create-for-rbac \
   --scopes /subscriptions/<your-subscription-id>/resourceGroups/<your-rg-name>
 ```
 
-> Store the output (`appId`, `password`, `tenant`) in Azure DevOps as a Service Connection — never in code.
+The output (`appId`, `password`, `tenant`) is registered in Azure DevOps as a **Service Connection** — it is never stored in code.
 
-### Register the Service Connection in Azure DevOps
+### 2. Register the Service Connection
 
-Project Settings → Service Connections → New → Azure Resource Manager → Service Principal (automatic)
+Azure DevOps → **Project Settings → Service Connections → New → Azure Resource Manager → Service Principal (automatic)**
 
-### Upload SSH keys to Azure DevOps Library
+### 3. Upload the SSH key to Azure DevOps Library
 
-Pipelines → Library → Secure Files → Upload `id_rsa` and `id_rsa.pub`
+**Pipelines → Library → Secure Files → Upload `id_rsa`**
 
-### Create an SSH Service Connection (for VM access)
+The SSH private key is stored encrypted in Azure DevOps. It is never committed to Git.
 
-Project Settings → Service Connections → New → SSH
+### 4. Create the SSH Service Connection
+
+**Project Settings → Service Connections → New → SSH**
 - **Host:** VM public IP
 - **Port:** 22
 - **Username:** `azureuser`
-- **Authentication:** SSH key (never password-based in production)
+- **Authentication:** SSH key (private key from Secure Files)
 - **Name:** `ssh-to-nginx-vm`
 
 ---
 
-## Key Concepts Demonstrated
+## What I Learned
 
-- Two-repo architecture cleanly separating infra and application pipelines
-- Terraform for full Azure infrastructure provisioning from code
-- Ansible for repeatable, idempotent application deployment
-- Azure DevOps YAML pipelines with GitHub branch and path triggers
-- Multi-stage pipelines: Build → Test → Deploy with stage gating
-- Secure File and secret variable management — zero secrets in code
-- PM2 for production Node.js process management on Linux
-- Deliberate manual IP handoff modelling real-world team boundaries
+- **Two-repo separation** enforces clean team boundaries. Infrastructure engineers own provisioning; application engineers own deployments. Neither needs access to the other's codebase.
+- **Path triggers** prevent unnecessary pipeline runs. The infra pipeline only fires when Terraform files change.
+- **Azure Secure Files** is the correct way to handle SSH keys in a pipeline. The key is encrypted at rest, never visible in logs, and deleted from the agent after use.
+- **Multi-stage pipelines with `condition: succeeded()`** create quality gates. A broken build or failed test physically cannot reach production.
+- **PM2** is essential for running Node.js apps in production on Linux. It handles crash recovery and VM-reboot persistence automatically.
 
 ---
 
-**Tools:** Terraform · Ansible · Azure DevOps · Azure VMs · MySQL · PM2 · Nginx · GitHub · SSH · Service Principal
+**Tools Used:** Terraform · Ansible · Azure DevOps · Azure VMs · MySQL · PM2 · Nginx · GitHub · SSH · Service Principal
