@@ -1,75 +1,120 @@
-# Project 01 — 3-Tier App Deployment on Azure VM
+# Project 01 — 3-Tier Application Deployment on Azure VM
 
-## Overview
+## What This Project Does
 
-Provisioned an Azure cloud VM from scratch and deployed a 3-tier application (UI + API + PostgreSQL) using Docker Compose. Docker installation was fully automated using a Cloud-Init bootstrap script injected at VM creation time — zero manual setup required on first boot.
+This project demonstrates how to provision a cloud virtual machine on Microsoft Azure from scratch and deploy a full 3-tier web application on it using Docker Compose — without installing anything manually. The entire environment bootstraps itself through a Cloud-Init script that runs automatically the moment the VM first boots.
+
+The application stack consists of three layers: a frontend served by Nginx, a Node.js API backend, and a PostgreSQL database. All three run as separate Docker containers that communicate with each other over an internal Docker network — the database is never exposed to the internet.
 
 ## Architecture
 
 ```
-Browser → port 80
-    ↓
-UI container (Nginx)
-    ↓  internal Docker network
-API container (Node.js) — port 3000
-    ↓  internal Docker network
-PostgreSQL container
+User's Browser
+      |
+   port 80 (HTTP)
+      |
+ [UI Container — Nginx]          ← serves the frontend, reverse proxies to API
+      |
+  internal Docker network
+      |
+ [API Container — Node.js]       ← handles business logic, talks to DB
+      |
+  internal Docker network
+      |
+ [Database — PostgreSQL]         ← data layer, not reachable from outside
 ```
+
+Only port 80 is exposed publicly. The API and database communicate entirely on Docker's internal network, never accessible from the internet.
+
+---
 
 ## Step 1 — Create the Azure VM with Cloud-Init
 
-In Azure Portal → Create VM → Advanced tab → Custom Data, paste the script below. Docker installs automatically on first boot with no manual steps needed.
+**Why:** Rather than SSH-ing in after VM creation and manually running installation commands, Cloud-Init lets us inject a startup script into the VM at creation time. Azure runs this script automatically on first boot — so by the time the VM is ready, Docker is already installed and running.
+
+In the **Azure Portal**, go to: **Create VM → Management tab → Custom Data**, and paste the script below.
 
 ```bash
 #!/bin/bash
+# Update the package list and upgrade existing packages
 apt update && apt upgrade -y
+
+# Install dependencies needed to add the Docker repository
 apt install -y apt-transport-https ca-certificates curl software-properties-common
 
+# Add Docker's official GPG key so the system trusts packages from Docker's repo
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
   gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 
+# Add the Docker apt repository to the system's software sources
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] \
   https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
   | tee /etc/apt/sources.list.d/docker.list
 
+# Install Docker Engine
 apt update
 apt install -y docker-ce docker-ce-cli containerd.io
+
+# Start Docker and ensure it restarts automatically if the VM reboots
 systemctl start docker
 systemctl enable docker
 ```
 
-**VM settings used:**
-- Authentication: SSH key-based (recommended for production; password auth is an option for quick lab environments but is not used in any production project here)
-- Inbound ports opened at creation: 22 (SSH), 80 (HTTP)
-- Public IP: assigned
+**VM configuration used:**
+- **Region:** East US (or nearest to you)
+- **Image:** Ubuntu 22.04 LTS
+- **Authentication:** SSH key pair
+- **Inbound ports opened at creation:** 22 (SSH access), 80 (HTTP for the app)
+- **Public IP:** Enabled so we can access the app from a browser
 
-## Step 2 — Configure Azure NSG Rules
+---
 
-After VM creation, add the following rules in the Network Security Group:
+## Step 2 — Open Port 3000 in the Network Security Group
 
-- Inbound rule: allow port 3000 (application API access)
-- Outbound rule: allow port 3000
+**Why:** Azure VMs are protected by a Network Security Group (NSG) — a firewall that blocks all inbound traffic by default except what you explicitly allow. Port 80 was opened at VM creation, but the Node.js API runs on port 3000 internally. We need to allow that port for direct API testing.
 
-## Step 3 — Transfer Application Code to the VM
+In the Azure Portal, navigate to the VM → **Networking** → **Add inbound port rule**:
+- **Destination port:** 3000
+- **Protocol:** TCP
+- **Action:** Allow
+
+---
+
+## Step 3 — Copy the Application Code to the VM
+
+**Why:** The application source code lives on your local machine. We use `scp` (Secure Copy Protocol, which runs over SSH) to transfer all files to the VM securely in a single command.
 
 ```bash
+# Copy everything from your current local directory to the VM's home folder
 # Replace <your-username> and <vm-public-ip> with your actual values
-# Transfer all app files to the VM
 scp -r * <your-username>@<vm-public-ip>:/home/<your-username>
 
-# SSH into the VM
+# Then SSH into the VM to continue working directly on it
 ssh <your-username>@<vm-public-ip>
 ```
 
-## Step 4 — Grant Docker Permissions (no sudo needed)
+---
+
+## Step 4 — Add Your User to the Docker Group
+
+**Why:** By default, the Docker daemon requires `sudo` to run commands. Adding your user to the `docker` group grants permission to run Docker without `sudo` — which is required for Docker Compose to work correctly without elevated privileges.
 
 ```bash
+# Add current user to the docker group
 sudo usermod -aG docker $USER
+
+# Apply the group change immediately without logging out
 newgrp docker
-docker ps    # verify Docker is running without sudo
+
+# Confirm Docker works without sudo
+docker ps
 ```
 
-## Step 5 — Update Frontend Config to Point to the VM's Public IP
+---
+
+## Step 5 — Update the Frontend API URL
+
+**Why:** The frontend needs to know where to send API requests. Since we are running on a cloud VM with a public IP (not localhost), we must update the config file to point to the VM's public IP address before building the containers.
 
 ```json
 // ui/config.json
@@ -78,44 +123,57 @@ docker ps    # verify Docker is running without sudo
 }
 ```
 
+---
+
 ## Step 6 — Install Docker Compose and Launch the Stack
 
+**Why:** Docker Compose reads the `docker-compose.yml` file and starts all three containers (UI, API, DB) in the correct order with a single command. Without Compose, you would need to run three separate `docker run` commands and manually configure networking between them.
+
 ```bash
+# Install Docker Compose
 sudo apt install -y docker-compose
+
+# Build images and start all containers in the background
 docker-compose up --build
 ```
 
-Expected output:
+When all three services start successfully, you will see output like:
 
 ```
-basic-3tier-ui  | 2025/03/14 20:08:30 [notice] 1#1: start worker process 22
+basic-3tier-ui  | nginx: worker process started
 basic-3tier-api | Connected to PostgreSQL Database
 basic-3tier-api | Database initialized
 basic-3tier-api | Server running on port 3000
 ```
 
-## Step 7 — Verify the Deployment
-
-```bash
-# Check all containers are running
-docker ps
-
-# Open in browser
-# http://<vm-public-ip>:80/
-
-# Troubleshoot if needed
-docker logs <container_name>
-```
-
-## Key Concepts Demonstrated
-
-- **Cloud-Init** — Zero-touch Docker installation at VM boot; no manual configuration steps
-- **Azure NSG** — Controlled port exposure: only required ports are opened
-- **Secure File Transfer** — `scp` for remote file transfer over SSH
-- **Docker Permissions** — Adding user to the `docker` group eliminates the need for `sudo`
-- **Docker Compose** — Single command orchestrates the full 3-tier stack
-- **Environment-Driven Config** — Frontend API URL set by environment (public IP injection)
+This confirms the API has connected to the database and all three tiers are running.
 
 ---
 
-**Tools:** Docker · Docker Compose · Azure VM · Cloud-Init · NSG · SSH · SCP · PostgreSQL
+## Step 7 — Verify the Deployment
+
+**Why:** Before considering the deployment complete, we verify each layer is healthy.
+
+```bash
+# Check that all three containers are in "Up" status
+docker ps
+
+# View logs for a specific container to diagnose any issues
+docker logs <container_name>
+```
+
+Then open a browser and navigate to `http://<vm-public-ip>` — the application should be live.
+
+---
+
+## What I Learned
+
+- **Cloud-Init** eliminates manual post-provisioning steps. The VM is application-ready the moment it boots.
+- **Azure NSGs** act as a firewall layer — explicit rules are required for every port you want to expose. This reinforces least-privilege network access.
+- **SCP** is the secure, SSH-based way to transfer files to a remote server. Never use unencrypted methods like FTP.
+- **Docker group permissions** matter for automation — `sudo` requirements break scripted deployments.
+- **Docker Compose** turns a multi-container deployment into a single command, handling container networking, startup ordering, and dependency management automatically.
+
+---
+
+**Tools Used:** Azure VM · Cloud-Init · Docker · Docker Compose · Nginx · Node.js · PostgreSQL · NSG · SSH · SCP
