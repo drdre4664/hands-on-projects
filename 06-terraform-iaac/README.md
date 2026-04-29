@@ -1,8 +1,8 @@
-# Terraform IaaC — AWS 3-Tier Architecture with High Availability
+# Project 06 — Terraform IaaC: AWS 3-Tier Architecture with High Availability
 
 ## Overview
 
-Provisioned a production-grade, highly available 3-tier architecture on AWS using Terraform Infrastructure as Code. The deployment includes a custom VPC with 6 subnets across 2 Availability Zones, public and internal Application Load Balancers, Auto Scaling Groups, and a Multi-AZ RDS MySQL database with a Read Replica.
+Provisioned a production-grade, highly available 3-tier architecture on AWS using Terraform Infrastructure as Code. The deployment includes a custom VPC with 6 subnets across 2 Availability Zones, public and internal Application Load Balancers, Auto Scaling Groups, and a Multi-AZ RDS MySQL database with a Read Replica — all managed through modular, reusable Terraform code with remote S3 state.
 
 ## Architecture
 
@@ -14,29 +14,29 @@ Internet
 [Public ALB] — sg_alb (port 80 inbound from 0.0.0.0/0)
     |
 [Web Tier EC2 — Public Subnets AZ-1 & AZ-2]
-    |   sg_web: allows 80 from sg_alb only
+    |   sg_web: allows port 80 from sg_alb only
     |
-[Internal ALB] — sg_internal_alb (port 80 from sg_web)
+[Internal ALB] — sg_internal_alb (port 80 from sg_web only)
     |
 [App Tier EC2 — Private Subnets AZ-1 & AZ-2]
-    |   sg_app: allows 3000 from sg_internal_alb only
+    |   sg_app: allows port 3000 from sg_internal_alb only
     |   NO public IP assigned
     |
 [RDS MySQL Multi-AZ + Read Replica]
-    sg_db: allows 3306 from sg_app ONLY
+    sg_db: allows port 3306 from sg_app ONLY
     [DB Subnets AZ-1 & AZ-2 — isolated tier]
 ```
 
-## Assignment Objectives
+## Project Goals
 
-- Create a custom VPC with 6 subnets: 2 public (web tier), 2 private (app tier), 2 DB subnets
-- Deploy Web Tier EC2 instances in public subnets — NO Elastic IPs
-- Deploy App Tier EC2 instances in private subnets — NO public IP
-- Configure Public ALB for web tier with health checks
-- Configure Internal ALB for app tier with health checks
-- Set up RDS MySQL with Multi-AZ deployment and a Read Replica
-- Implement Security Groups with least-privilege access between tiers
-- DB Tier SG allows ONLY App Tier SG on port 3306
+- Custom VPC with 6 subnets: 2 public (web tier), 2 private (app tier), 2 isolated DB subnets
+- Web Tier EC2 instances in public subnets — no Elastic IPs attached
+- App Tier EC2 instances in private subnets — no public IP address
+- Public ALB for web tier with health check on `/health`
+- Internal ALB for app tier with health check on `/health`
+- RDS MySQL with Multi-AZ deployment and a Read Replica
+- Least-privilege Security Groups between every tier
+- DB Security Group allows only App Tier Security Group on port 3306
 
 ## Project Structure
 
@@ -45,7 +45,7 @@ Internet
 ├── main.tf
 ├── variables.tf
 ├── outputs.tf
-├── terraform.tfvars
+├── terraform.tfvars.example    ← template only; never commit a populated tfvars
 └── modules/
     ├── network/
     │   ├── main.tf
@@ -75,7 +75,7 @@ terraform {
     }
   }
   backend "s3" {
-    bucket = "devops-terraform-state-bucket"
+    bucket = "your-terraform-state-bucket"
     key    = "prod/3tier/terraform.tfstate"
     region = "us-east-1"
   }
@@ -249,8 +249,8 @@ resource "aws_db_instance" "primary" {
   engine_version         = "8.0"
   instance_class         = var.db_instance_class
   db_name                = var.db_name
-  username               = var.db_username
-  password               = var.db_password
+  username               = var.db_username  # supplied via tfvars or CI/CD vault
+  password               = var.db_password  # sensitive = true; never hardcoded
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [var.db_sg_id]
   multi_az               = true
@@ -280,49 +280,82 @@ variable "private_subnets"    { default = ["10.0.3.0/24", "10.0.4.0/24"] }
 variable "db_subnets"         { default = ["10.0.5.0/24", "10.0.6.0/24"] }
 variable "availability_zones" { default = ["us-east-1a", "us-east-1b"] }
 variable "ami_id"             { default = "ami-0c02fb55956c7d316" }
-variable "key_name"           {}
+variable "key_name"           { description = "Name of the EC2 key pair" }
 variable "web_instance_type"  { default = "t3.micro" }
 variable "app_instance_type"  { default = "t3.micro" }
 variable "db_instance_class"  { default = "db.t3.micro" }
-variable "db_name"            { default = "appdb" }
-variable "db_username"        { default = "admin" }
-variable "db_password"        { sensitive = true }
+variable "db_name"            { description = "Database name" }
+variable "db_username"        { description = "Database admin username" }
+variable "db_password"        {
+  description = "Database admin password"
+  sensitive   = true
+}
 variable "web_min_size"       { default = 2 }
 variable "web_max_size"       { default = 4 }
 variable "app_min_size"       { default = 2 }
 variable "app_max_size"       { default = 4 }
 ```
 
+### terraform.tfvars.example
+
+```hcl
+# Copy to terraform.tfvars and fill in your own values.
+# terraform.tfvars is listed in .gitignore — never commit it.
+key_name    = "your-ec2-keypair-name"
+db_name     = "appdb"
+db_username = "dbadmin"
+db_password = "replace-with-a-strong-password"
+```
+
 ## Deployment Steps
 
 ```bash
-# 1. Initialize Terraform
+# 1. Copy and populate vars (do NOT commit terraform.tfvars)
+cp terraform.tfvars.example terraform.tfvars
+
+# 2. Initialise Terraform — downloads providers, configures S3 backend
 terraform init
 
-# 2. Review plan
-terraform plan -var="key_name=my-keypair" -var="db_password=SecurePass123!"
+# 3. Preview the execution plan — no changes applied yet
+terraform plan
 
-# 3. Apply
-terraform apply -var="key_name=my-keypair" -var="db_password=SecurePass123!" -auto-approve
+# 4. Apply the infrastructure
+terraform apply
 
-# 4. Get outputs
+# 5. Retrieve outputs after a successful apply
 terraform output public_alb_dns
 terraform output db_endpoint
 
-# 5. Destroy
-terraform destroy -auto-approve
+# 6. Verify health checks on the Public ALB
+curl -I http://$(terraform output -raw public_alb_dns)/health
+# Expected: HTTP/1.1 200 OK
+
+# 7. Tear down when done
+terraform destroy
 ```
+
+## Security Practices Applied
+
+| Concern | Approach |
+|---|---|
+| DB credentials | Sensitive Terraform variables — never hardcoded; passed via `terraform.tfvars` (gitignored) or CI/CD secret store |
+| AWS credentials | IAM role on CI runner or local `~/.aws/credentials` — never in code |
+| App Tier | No public IP; only reachable via Internal ALB |
+| DB Tier | Security Group restricts access to App Tier SG on port 3306 only |
+| State file | Remote S3 backend with AES-256 encryption and DynamoDB state locking |
+| Sensitive output | `sensitive = true` on `db_password` — masked in all plan and apply output |
 
 ## Key Concepts Demonstrated
 
-- **Modular Terraform** — network, compute, and database as reusable modules
-- **Remote State** — S3 backend with state locking
-- **High Availability** — Multi-AZ deployment across 2 Availability Zones
-- **Security** — Least-privilege Security Groups; App Tier has no public IP
-- **Load Balancing** — Public ALB for web tier, Internal ALB for app tier
-- **Auto Scaling** — ASG for both tiers with ELB health checks
-- **RDS Multi-AZ** — Automatic failover + Read Replica for read scaling
+- **Modular Terraform** — network, compute, and database split into independently reusable modules
+- **Remote State** — S3 backend with DynamoDB locking for safe team collaboration
+- **High Availability** — Multi-AZ deployment spanning two Availability Zones
+- **Least-Privilege Security** — Each tier's Security Group only allows traffic from its direct upstream caller
+- **Load Balancing** — Public ALB for web tier; Internal ALB for app tier
+- **Auto Scaling** — ASG on both tiers with ELB health checks and configurable grace period
+- **RDS Multi-AZ** — Synchronous standby with automatic failover, plus a Read Replica for read scaling
+- **Credential Safety** — `sensitive = true` on all secret variables; `.gitignore` excludes `terraform.tfvars`
 
 ---
 
-**Tools:** Terraform · AWS VPC · EC2 · ALB · Auto Scaling · RDS MySQL · S3
+**Tools:** Terraform · AWS VPC · EC2 · ALB · Auto Scaling Groups · RDS MySQL · S3 · IAM
