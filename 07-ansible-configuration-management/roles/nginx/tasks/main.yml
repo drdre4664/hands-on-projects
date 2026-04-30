@@ -1,0 +1,53 @@
+---
+# ============================================================
+# roles/nginx/tasks/main.yml — Install and configure Nginx
+# ============================================================
+# Nginx acts as a reverse proxy: it terminates HTTP connections
+# and forwards requests to the Node.js app on port 3000.
+# This separates concerns — Nginx handles static files and TLS,
+# Node.js handles application logic.
+
+- name: Install Nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+
+# Disable the default site to avoid conflicts with our virtual host config.
+- name: Remove Nginx default site symlink
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: reload nginx   # triggers the handler to reload Nginx after this change
+
+# Deploy our application's Nginx config from the Jinja2 template.
+# The template substitutes variables (app_port, nginx_server_name, etc.)
+# from group_vars at deployment time.
+- name: Deploy Nginx virtual host config from template
+  ansible.builtin.template:
+    src: epicbook.conf.j2             # template file in roles/nginx/templates/
+    dest: /etc/nginx/sites-available/epicbook.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload nginx
+
+# Enable the site by creating a symlink in sites-enabled.
+# Nginx only reads configs from sites-enabled, not sites-available.
+- name: Enable epicbook virtual host
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/epicbook.conf
+    dest: /etc/nginx/sites-enabled/epicbook.conf
+    state: link
+  notify: reload nginx
+
+# Validate the config before enabling to catch syntax errors early.
+- name: Test Nginx configuration syntax
+  ansible.builtin.command: nginx -t
+  changed_when: false   # nginx -t never modifies state
+
+- name: Ensure Nginx is started and enabled on boot
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true         # enabled = start automatically on system reboot
