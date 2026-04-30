@@ -1,0 +1,70 @@
+---
+# ============================================================
+# roles/common/tasks/main.yml — OS hardening and baseline setup
+# ============================================================
+# This role runs first on every host to ensure a consistent,
+# secure baseline before application-specific roles run.
+
+# ── System updates ────────────────────────────────────────────
+# Keeping packages current closes known CVEs before the app is deployed.
+- name: Update apt package cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600   # skip update if cache is less than 1 hour old
+
+- name: Upgrade all installed packages to latest
+  ansible.builtin.apt:
+    upgrade: dist            # dist-upgrade handles dependency changes safely
+
+# ── Install baseline packages ─────────────────────────────────
+# Packages defined in group_vars/web.yml so they can be changed per environment.
+- name: Install common system packages
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+
+# ── Configure UFW firewall ────────────────────────────────────
+# UFW provides a simple wrapper around iptables.
+# Default deny-all, then open only required ports.
+- name: Set UFW default policy to deny all inbound
+  community.general.ufw:
+    state: enabled
+    default: deny
+    direction: incoming
+
+- name: Apply UFW allow rules from group_vars
+  community.general.ufw:
+    rule: "{{ item.rule }}"
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+  loop: "{{ ufw_rules }}"    # loops over the list defined in group_vars/web.yml
+
+# ── Install Node.js ───────────────────────────────────────────
+# Using NodeSource repo ensures we get the exact major version specified
+# in group_vars rather than the outdated version in Ubuntu's default apt repo.
+- name: Add NodeSource apt repository for Node.js {{ nodejs_version }}
+  ansible.builtin.shell: |
+    curl -fsSL https://deb.nodesource.com/setup_{{ nodejs_version }} | bash -
+  args:
+    creates: /etc/apt/sources.list.d/nodesource.list   # skip if repo already added
+
+- name: Install Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+
+- name: Verify Node.js version
+  ansible.builtin.command: node --version
+  register: node_version
+  changed_when: false   # this task never makes changes — just gathers info
+
+- name: Print installed Node.js version
+  ansible.builtin.debug:
+    msg: "Node.js installed: {{ node_version.stdout }}"
+
+# ── Set system timezone ───────────────────────────────────────
+# Consistent timezone prevents log correlation confusion across servers.
+- name: Set system timezone to UTC
+  community.general.timezone:
+    name: UTC
