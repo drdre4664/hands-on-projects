@@ -1,0 +1,64 @@
+# ============================================================
+# roles/nginx/templates/epicbook.conf.j2
+# ============================================================
+# This is a Jinja2 template. Variables in {{ }} are substituted
+# by Ansible at deploy time using values from group_vars/web.yml.
+# The rendered file is placed at /etc/nginx/sites-available/epicbook.conf.
+
+upstream epicbook_app {
+    # Pass requests to the Node.js application running on localhost.
+    # Using an upstream block makes it easy to add more app instances later.
+    server 127.0.0.1:{{ app_port }};   # app_port = 3000 from group_vars
+
+    # keepalive = reuse TCP connections to the upstream app instead of
+    # opening a new connection for every request.
+    keepalive 32;
+}
+
+server {
+    listen {{ nginx_listen_port }};          # port 80 (HTTP)
+    server_name {{ nginx_server_name }};     # _ = accept any hostname
+
+    # ── Logging ───────────────────────────────────────────────
+    # Separate log files per virtual host make debugging easier.
+    access_log /var/log/nginx/epicbook_access.log;
+    error_log  /var/log/nginx/epicbook_error.log warn;
+
+    # ── Health check endpoint ─────────────────────────────────
+    # The Load Balancer (from the Terraform project) probes this path.
+    # Returning 200 immediately without proxying reduces unnecessary latency.
+    location /health {
+        access_log off;         # exclude health checks from access log (reduces noise)
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+
+    # ── Static assets ─────────────────────────────────────────
+    # Serve static files directly from disk instead of proxying to Node.js.
+    # expires 30d tells browsers to cache these files for 30 days.
+    location /static/ {
+        alias {{ app_deploy_path }}/public/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # ── Application proxy ─────────────────────────────────────
+    # All other requests are forwarded to the Node.js upstream.
+    location / {
+        proxy_pass         http://epicbook_app;
+        proxy_http_version 1.1;
+
+        # Required headers for WebSocket support and correct origin detection.
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Timeout settings — adjust based on your slowest expected response.
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+    }
+}
