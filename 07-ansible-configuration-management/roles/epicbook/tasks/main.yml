@@ -1,0 +1,71 @@
+---
+# ============================================================
+# roles/epicbook/tasks/main.yml — Deploy the EpicBook application
+# ============================================================
+# This role runs after common and nginx. It clones the app repo,
+# installs dependencies, writes the environment config, and starts
+# the application as a systemd service.
+
+# ── Create application directory ──────────────────────────────
+- name: Create application deploy directory
+  ansible.builtin.file:
+    path: "{{ app_deploy_path }}"
+    state: directory
+    owner: "{{ ansible_user }}"   # owned by the SSH user, not root
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+# ── Write environment configuration ───────────────────────────
+# The .env file is written from variables — never committed to source control.
+# vault_db_user and vault_db_password come from Ansible Vault.
+- name: Write application .env file
+  ansible.builtin.template:
+    src: dotenv.j2                # template in roles/epicbook/templates/
+    dest: "{{ app_deploy_path }}/.env"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"   # read/write for owner only — secrets file
+  notify: restart epicbook
+
+# ── Install Node.js dependencies ──────────────────────────────
+# npm ci (clean install) is preferred over npm install in automated deployments:
+# it uses package-lock.json for reproducible installs and fails on lockfile mismatch.
+- name: Install Node.js dependencies
+  community.general.npm:
+    path: "{{ app_deploy_path }}"
+    ci: true           # equivalent to npm ci — uses lockfile, fails on mismatch
+
+# ── Install PM2 process manager ───────────────────────────────
+# PM2 keeps the Node.js process running and restarts it on crash.
+# Installing globally makes the pm2 command available system-wide.
+- name: Install PM2 globally
+  community.general.npm:
+    name: pm2
+    global: true
+    state: present
+
+# ── Create systemd service for PM2 ───────────────────────────
+# pm2 startup generates a systemd unit that starts PM2 (and all its
+# managed processes) automatically after a server reboot.
+- name: Generate PM2 startup script
+  ansible.builtin.command: pm2 startup systemd -u {{ ansible_user }} --hp /home/{{ ansible_user }}
+  args:
+    creates: /etc/systemd/system/pm2-{{ ansible_user }}.service   # skip if already done
+  become: true
+
+# ── Start the application ─────────────────────────────────────
+- name: Start EpicBook with PM2
+  ansible.builtin.command: >
+    pm2 start {{ app_deploy_path }}/server.js
+    --name {{ app_name }}
+    --env production
+  args:
+    chdir: "{{ app_deploy_path }}"
+  register: pm2_start
+  changed_when: "'already launched' not in pm2_start.stdout"
+
+# ── Save PM2 process list ─────────────────────────────────────
+# pm2 save writes the current process list to disk so it survives reboots.
+- name: Save PM2 process list
+  ansible.builtin.command: pm2 save
+  changed_when: true   # always runs — save is idempotent but marks changed for visibility
