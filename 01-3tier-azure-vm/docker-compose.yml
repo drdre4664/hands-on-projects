@@ -1,0 +1,93 @@
+# ============================================================
+# docker-compose.yml — 3-Tier Azure VM: local dev environment
+# ============================================================
+# This Compose file mirrors the 3-tier architecture deployed on Azure:
+#   Tier 1 (Web)     — React frontend served by Nginx
+#   Tier 2 (App)     — Node.js/Express API
+#   Tier 3 (Data)    — MySQL database
+#
+# On Azure, each tier runs on a separate VM with NSG rules
+# controlling traffic between tiers. Locally, Docker networks
+# simulate that isolation.
+#
+# Run:     docker compose up -d
+# Stop:    docker compose down
+# Rebuild: docker compose up -d --build
+
+services:
+
+  # ── Tier 1: Web — Nginx + React ──────────────────────────────
+  # Serves the compiled React frontend and proxies API calls to the backend.
+  # On Azure this tier sits in the public subnet behind a Load Balancer.
+  web:
+    image: nginx:1.25-alpine
+    container_name: tier1-web
+    ports:
+      - "80:80"               # exposed to the host machine (equivalent to Azure public IP)
+    volumes:
+      - ./web/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./web/build:/usr/share/nginx/html:ro    # compiled React static files
+    depends_on:
+      - app
+    networks:
+      - web-to-app            # can only talk to app tier — not directly to db
+
+  # ── Tier 2: App — Node.js API ────────────────────────────────
+  # Handles business logic. On Azure this VM is in a private subnet
+  # only reachable from the web tier via NSG rules.
+  app:
+    build:
+      context: ./app
+    container_name: tier2-app
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_HOST=db            # service name resolves to the db container IP
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - web-to-app            # reachable from web tier
+      - app-to-db             # can reach db tier
+
+  # ── Tier 3: Data — MySQL ──────────────────────────────────────
+  # Database tier. On Azure this VM has no public IP and is only
+  # reachable from the app tier via a private subnet NSG rule.
+  db:
+    image: mysql:8.0
+    container_name: tier3-db
+    environment:
+      - MYSQL_DATABASE=${DB_NAME}
+      - MYSQL_USER=${DB_USER}
+      - MYSQL_PASSWORD=${DB_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+    env_file:
+      - .env
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - app-to-db             # only reachable from app tier — web tier cannot reach db
+
+volumes:
+  db-data:
+
+# ── Network isolation (mirrors Azure NSG rules) ───────────────
+# web-to-app:  web tier can talk to app tier
+# app-to-db:   app tier can talk to db tier
+# web tier CANNOT talk directly to db — enforced by network isolation
+networks:
+  web-to-app:
+    driver: bridge
+  app-to-db:
+    driver: bridge
