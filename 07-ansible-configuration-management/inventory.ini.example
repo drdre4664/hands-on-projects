@@ -1,0 +1,30 @@
+# ============================================================
+# inventory.ini.example — Ansible inventory template
+# ============================================================
+# HOW TO USE:
+#   cp inventory.ini.example inventory.ini
+#   Replace <placeholders> with your actual server IPs or hostnames.
+#   NEVER commit inventory.ini — it is listed in .gitignore.
+#
+# Test connectivity to all hosts:
+#   ansible -i inventory.ini all -m ping
+
+# ── Web tier ─────────────────────────────────────────────────
+# [web] is the group name referenced in site.yml as  hosts: web
+[web]
+web1 ansible_host=<server-1-ip> ansible_user=<your-ssh-user>
+web2 ansible_host=<server-2-ip> ansible_user=<your-ssh-user>
+
+# ── Group-level variables ─────────────────────────────────────
+# These apply to every host in [web] unless overridden at host level.
+[web:vars]
+ansible_ssh_private_key_file=~/.ssh/id_rsa   # path to your SSH private key
+ansible_python_interpreter=/usr/bin/python3   # explicit interpreter avoids warnings on Ubuntu 22
+
+# ── Example with Azure VM public IPs ─────────────────────────
+# If using Azure VMs from the Terraform project (06), grab IPs with:
+#   terraform output load_balancer_public_ip
+#
+# [web]
+# web1 ansible_host=20.108.X.X ansible_user=azureuser
+# web2 ansible_host=20.108.X.Y ansible_user=azureuser
