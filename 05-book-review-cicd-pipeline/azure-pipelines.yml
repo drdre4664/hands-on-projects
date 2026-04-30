@@ -1,0 +1,174 @@
+# ============================================================
+# azure-pipelines.yml — CI/CD pipeline for Book Review App
+# ============================================================
+# Pipeline stages:
+#   1. build   — install dependencies, run tests, lint code
+#   2. docker  — build Docker image and push to Azure Container Registry
+#   3. deploy  — pull latest image on the Azure VM and restart the container
+#
+# Prerequisites (set these in Azure DevOps Pipeline > Variables > Secret):
+#   ACR_NAME          — your Azure Container Registry name (e.g. myregistry)
+#   ACR_USERNAME      — ACR service principal / admin username
+#   ACR_PASSWORD      — ACR service principal / admin password (mark as secret)
+#   VM_SSH_KEY        — private SSH key for the deployment target (mark as secret)
+#   VM_HOST           — IP or hostname of the target Azure VM
+#   VM_USER           — SSH username for the target VM
+
+trigger:
+  branches:
+    include:
+      - main          # pipeline triggers on every push to main
+  paths:
+    exclude:
+      - "*.md"        # skip pipeline runs for documentation-only changes
+
+# Use the latest Ubuntu-hosted agent — free tier for public repos
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  imageName: "bookreview-app"
+  imageTag: $(Build.BuildId)   # unique tag per pipeline run — enables rollback
+  acrLoginServer: $(ACR_NAME).azurecr.io
+
+# ============================================================
+# Stage 1 — Build and Test
+# ============================================================
+stages:
+- stage: Build
+  displayName: "Build and Test"
+  jobs:
+  - job: BuildTest
+    displayName: "Install, Lint, Test"
+    steps:
+
+    # ── Set up Node.js ────────────────────────────────────────
+    # Pinning the exact Node.js version prevents "works on my machine" issues
+    # caused by version drift between developers and the CI agent.
+    - task: NodeTool@0
+      inputs:
+        versionSpec: "20.x"
+      displayName: "Install Node.js 20.x"
+
+    # ── Install dependencies ──────────────────────────────────
+    # npm ci uses package-lock.json for reproducible installs.
+    # Faster than npm install in CI because it skips the resolution step.
+    - script: npm ci
+      workingDirectory: backend
+      displayName: "npm ci — install dependencies"
+
+    # ── Run linter ────────────────────────────────────────────
+    # Linting catches style issues and common bugs before tests run.
+    # Failing fast here avoids wasting time on test runs with broken code.
+    - script: npm run lint
+      workingDirectory: backend
+      displayName: "ESLint — check code quality"
+
+    # ── Run unit tests ────────────────────────────────────────
+    # Jest outputs JUnit XML so Azure DevOps can display test results
+    # in the pipeline summary UI.
+    - script: npm test -- --ci --reporters=jest-junit
+      workingDirectory: backend
+      displayName: "Jest — run unit tests"
+      env:
+        NODE_ENV: test
+
+    # ── Publish test results ──────────────────────────────────
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: "JUnit"
+        testResultsFiles: "**/junit.xml"
+      displayName: "Publish test results to pipeline"
+      condition: always()   # publish even if tests fail so we can see what broke
+
+# ============================================================
+# Stage 2 — Docker Build and Push
+# ============================================================
+- stage: Docker
+  displayName: "Build and Push Docker Image"
+  dependsOn: Build          # only runs if Build stage passed
+  condition: succeeded()
+  jobs:
+  - job: DockerBuildPush
+    displayName: "Build image and push to ACR"
+    steps:
+
+    # ── Log in to Azure Container Registry ───────────────────
+    # Using a service principal stored as a pipeline secret —
+    # credentials never appear in logs.
+    - task: Docker@2
+      displayName: "Login to ACR"
+      inputs:
+        command: login
+        containerRegistry: $(ACR_NAME)   # service connection configured in Azure DevOps
+
+    # ── Build Docker image ────────────────────────────────────
+    # Tags with both the build ID (immutable) and 'latest' (mutable pointer).
+    # The build ID tag is used for the actual deployment so we can pin versions.
+    - task: Docker@2
+      displayName: "Build Docker image"
+      inputs:
+        command: build
+        repository: $(acrLoginServer)/$(imageName)
+        tags: |
+          $(imageTag)
+          latest
+        dockerfile: backend/Dockerfile
+        buildContext: backend
+
+    # ── Push image to ACR ─────────────────────────────────────
+    - task: Docker@2
+      displayName: "Push image to ACR"
+      inputs:
+        command: push
+        repository: $(acrLoginServer)/$(imageName)
+        tags: |
+          $(imageTag)
+          latest
+
+# ============================================================
+# Stage 3 — Deploy to Azure VM
+# ============================================================
+- stage: Deploy
+  displayName: "Deploy to Azure VM"
+  dependsOn: Docker
+  condition: succeeded()
+  jobs:
+  - deployment: DeployVM
+    displayName: "SSH deploy to VM"
+    environment: "production"   # links to Azure DevOps Environment for approval gates
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          # ── Deploy over SSH ──────────────────────────────────
+          # Pulls the new image and does a zero-downtime swap:
+          # starts the new container before stopping the old one.
+          - task: SSH@0
+            displayName: "Pull new image and restart container"
+            inputs:
+              sshEndpoint: "vm-ssh-connection"   # SSH service connection in Azure DevOps
+              runOptions: inline
+              inline: |
+                # Log in to ACR from the VM
+                echo $(ACR_PASSWORD) | docker login $(acrLoginServer) -u $(ACR_USERNAME) --password-stdin
+
+                # Pull the specific build ID image (not 'latest') for traceability
+                docker pull $(acrLoginServer)/$(imageName):$(imageTag)
+
+                # Stop and remove the old container if it exists
+                docker stop bookreview || true
+                docker rm   bookreview || true
+
+                # Start the new container, passing env vars from the VM's .env file
+                docker run -d \
+                  --name bookreview \
+                  --restart unless-stopped \
+                  -p 80:3000 \
+                  --env-file /opt/bookreview/.env \
+                  $(acrLoginServer)/$(imageName):$(imageTag)
+
+                # Quick smoke test — confirm the container started and port 80 responds
+                sleep 5
+                curl -f http://localhost/health || (echo "Health check failed" && exit 1)
