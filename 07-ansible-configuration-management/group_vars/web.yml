@@ -1,0 +1,47 @@
+---
+# ============================================================
+# group_vars/web.yml — Variables applied to all hosts in [web]
+# ============================================================
+# These are non-sensitive configuration values.
+# Sensitive values (db_password, vault_db_user, etc.) should be
+# stored in an Ansible Vault file: group_vars/vault.yml
+# Encrypt with:  ansible-vault encrypt group_vars/vault.yml
+
+# ── Application settings ──────────────────────────────────────
+app_name: "epicbook"
+app_port: 3000                     # the Node.js app listens on this port internally
+app_deploy_path: "/var/www/epicbook"  # where the application files live on the server
+
+# ── Nginx settings ────────────────────────────────────────────
+nginx_server_name: "_"             # _ means accept requests for any hostname
+nginx_listen_port: 80
+nginx_proxy_pass: "http://localhost:{{ app_port }}"  # forward to Node.js
+
+# ── Node.js version ───────────────────────────────────────────
+# Pinning the major version ensures consistent behaviour across rebuilds.
+nodejs_version: "20.x"            # LTS line — change to 22.x when LTS status confirmed
+
+# ── System packages ───────────────────────────────────────────
+# Installed by the common role during OS setup.
+common_packages:
+  - git             # needed to clone the application repo on the server
+  - curl            # used in the Node.js install script
+  - ufw             # uncomplicated firewall — managed in the common role
+  - unzip           # general utility
+
+# ── Firewall rules ────────────────────────────────────────────
+# UFW rules applied by the common role.
+ufw_rules:
+  - { port: "22",  proto: "tcp", rule: "allow" }   # SSH — restrict source IP in production
+  - { port: "80",  proto: "tcp", rule: "allow" }   # HTTP
+  - { port: "443", proto: "tcp", rule: "allow" }   # HTTPS (for future TLS termination)
+
+# ── Database connection (non-sensitive) ───────────────────────
+# Host and port only — username and password come from vault.yml
+db_host: "{{ vault_db_host }}"     # resolved from Ansible Vault at runtime
+db_port: 3306
+db_name: "epicbook_db"
+
+# ── Application environment ───────────────────────────────────
+# NODE_ENV controls whether the app runs in production mode (no debug output).
+app_env: "production"
