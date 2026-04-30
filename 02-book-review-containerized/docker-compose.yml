@@ -1,0 +1,100 @@
+# ============================================================
+# docker-compose.yml — Book Review App: containerized stack
+# ============================================================
+# This project containerises the Book Review application so it
+# runs identically in dev, staging, and production.
+#
+# Services:
+#   frontend — React app (port 3000)
+#   backend  — Node.js/Express REST API (port 5000)
+#   db       — MySQL 8
+#
+# Prerequisites:
+#   Copy .env.example to .env and fill in values before running.
+#
+# Commands:
+#   Start:   docker compose up -d
+#   Logs:    docker compose logs -f
+#   Stop:    docker compose down
+#   Reset:   docker compose down -v   (WARNING: deletes all data)
+
+services:
+
+  # ── Frontend — React ──────────────────────────────────────────
+  # React development server runs on port 3000.
+  # In production, replace this with a multi-stage build (see project 04).
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bookreview-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000   # points to the backend API
+    depends_on:
+      - backend
+    networks:
+      - app-net
+
+  # ── Backend — Express API ─────────────────────────────────────
+  # REST API handles CRUD operations for books and reviews.
+  # All credentials are read from the .env file — never hardcoded here.
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bookreview-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - DB_HOST=db            # 'db' resolves to the db service IP inside the Docker network
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy   # wait for MySQL to be fully ready before starting
+    restart: unless-stopped
+    networks:
+      - app-net
+
+  # ── Database — MySQL 8 ────────────────────────────────────────
+  # Credentials are injected from .env — the MySQL image reads
+  # MYSQL_* environment variables on first startup to create the DB and user.
+  db:
+    image: mysql:8.0
+    container_name: bookreview-db
+    environment:
+      - MYSQL_DATABASE=${DB_NAME}
+      - MYSQL_USER=${DB_USER}
+      - MYSQL_PASSWORD=${DB_PASSWORD}
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+    env_file:
+      - .env
+    volumes:
+      - db-data:/var/lib/mysql               # persist data across container restarts
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro   # create tables on first run
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro       # sample data
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-net
+
+volumes:
+  db-data:    # named volume ensures DB data survives  docker compose down
+
+networks:
+  app-net:
+    driver: bridge
