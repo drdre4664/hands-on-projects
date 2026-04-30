@@ -1,0 +1,18 @@
+---
+# ============================================================
+# roles/nginx/handlers/main.yml — Nginx event handlers
+# ============================================================
+# Handlers only run when notified by a task (via "notify: reload nginx").
+# They run exactly once at the end of the play, even if notified multiple times.
+# This prevents unnecessary reloads when multiple tasks change config files.
+
+- name: reload nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded   # reloaded = graceful config reload (no connection drop)
+                      # Use 'restarted' only if a full process restart is needed
+
+- name: restart nginx
+  ansible.builtin.service:
+    name: nginx
+    state: restarted  # full restart — use for changes that require a new process
