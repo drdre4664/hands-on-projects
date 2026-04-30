@@ -1,50 +1,31 @@
 ---
-# ============================================================
-# site.yml — Master playbook: applies all roles to all hosts
-# ============================================================
-# Run with:
-#   ansible-playbook -i inventory.ini site.yml
+# site.yml - Master playbook for EpicBook deployment
 #
-# Dry-run (check what would change without making changes):
-#   ansible-playbook -i inventory.ini site.yml --check
+# Applies three roles in order against the [web] host group:
+#   1. common   - system updates, baseline packages, SSH hardening
+#   2. nginx    - install Nginx, deploy site config from Jinja2 template
+#   3. epicbook - clone app repo, set permissions, reload Nginx
 #
-# Limit to a single host:
-#   ansible-playbook -i inventory.ini site.yml --limit web1
+# Variables load automatically from group_vars/web.yml
+#
+# Run:     ansible-playbook -i inventory.ini site.yml
+# Dry-run: ansible-playbook -i inventory.ini site.yml --check
+# Re-runs are safe - all tasks are idempotent
 
-# ── Play 1: Harden and configure all web servers ─────────────
-- name: Configure web servers
-  hosts: web           # matches the [web] group in inventory.ini
-  become: true         # run tasks as root via sudo
-  gather_facts: true   # collect OS facts (distro, IP, etc.) for use in templates
-
-  # Variables loaded from group_vars/web.yml — keep secrets in vault.yml
-  vars_files:
-    - group_vars/web.yml
-
-  roles:
-    # Order matters — common must run before nginx and epicbook
-    - role: common       # 1. OS hardening: updates, firewall, non-root user
-    - role: nginx        # 2. Install and configure Nginx as reverse proxy
-    - role: epicbook     # 3. Deploy the EpicBook application behind Nginx
-
-# ── Play 2: Smoke-test the deployment ────────────────────────
-- name: Verify deployment
+- name: Prepare system
   hosts: web
-  become: false          # verification runs as the connect user, not root
-  gather_facts: false
+  become: true
+  roles:
+    - common
 
-  tasks:
-    - name: Check that Nginx is serving the application on port 80
-      ansible.builtin.uri:
-        url: "http://{{ ansible_host }}/health"
-        status_code: 200
-        return_content: true
-      register: health_check
-      # Retries handle race conditions where the app needs a moment to start
-      retries: 5
-      delay: 5
-      until: health_check.status == 200
+- name: Install and configure Nginx
+  hosts: web
+  become: true
+  roles:
+    - nginx
 
-    - name: Print health check result
-      ansible.builtin.debug:
-        msg: "Health check passed: {{ health_check.content }}"
+- name: Deploy EpicBook application
+  hosts: web
+  become: true
+  roles:
+    - epicbook
